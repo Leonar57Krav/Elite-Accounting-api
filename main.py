@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import pandas as pd
 from datetime import datetime
 import re
+import pdfplumber
 
 app = Flask(__name__)
 
@@ -26,52 +27,71 @@ class SimpleCategorizer:
             if re.search(regex, desc, re.IGNORECASE): return cat
         return "other"
 
+def extract_text_from_pdf(pdf_file):
+    text = ""
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+    return text
+
 # ====================== SIMPLIFIED REPORT ======================
 def create_simple_report(client_name, df, total_deductible):
     income = df[df['amount'] > 0]['amount'].sum()
     expenses = abs(df[df['amount'] < 0]['amount'].sum())
-    
     breakdown = df.groupby('category')['amount'].sum().abs().to_dict()
     top_category = max(breakdown, key=breakdown.get) if breakdown else "none"
     
     html = f"""
-    <html>
-    <body style="font-family: Arial; line-height: 1.6; max-width: 600px;">
+    <html><body style="font-family: Arial; line-height: 1.6; max-width: 600px;">
         <h2>Elite Accounting USA — Simple Monthly Summary</h2>
         <p>Hi {client_name},</p>
         <p>Here's what we found in your bank statement:</p>
-        
         <h3>💰 Quick Numbers</h3>
         <ul>
             <li><strong>Income:</strong> ${income:,.0f}</li>
             <li><strong>Expenses:</strong> ${expenses:,.0f}</li>
             <li><strong>Tax Savings Found:</strong> <span style="color:green; font-size:18px;"><strong>${total_deductible:,.0f}</strong></span></li>
         </ul>
-        
         <h3>📌 Top Deductible Items</h3>
         <ul>
             {"".join([f"<li>{cat.title()}: ${amount:,.0f}</li>" for cat, amount in list(breakdown.items())[:4]])}
         </ul>
-        
-        <p><strong>Quick Tip:</strong> Your biggest savings came from <strong>{top_category}</strong>. Keep tracking this category to save even more next month.</p>
-        
-        <p>Reply <strong>APPROVE</strong> to file with IRS or tell me any changes.</p>
+        <p><strong>Quick Tip:</strong> Your biggest savings came from <strong>{top_category}</strong>.</p>
+        <p>Reply <strong>APPROVE</strong> to file with IRS or tell me changes.</p>
         <p>— Elite Accounting USA</p>
-    </body>
-    </html>
+    </body></html>
     """
     return html
 
-# ====================== MAIN ENDPOINT (SIMPLIFIED OUTPUT) ======================
+# ====================== MAIN ENDPOINT (now accepts PDF files) ======================
 @app.route('/agent', methods=['POST'])
-def run_simple_agent():
-    data = request.get_json()
-    client_name = data.get("client_name", "Client")
-    message_body = data.get("message_body", "")
+def run_pdf_agent():
+    client_name = request.form.get("client_name", "Valued Client")
+    source = request.form.get("source", "gmail")
     
-    # Extract & process
-    transactions = []  # (same improved extraction from last upgrade)
-    # ... (extraction code kept from previous version for accuracy)
+    # Support both text and PDF upload
+    if 'pdf' in request.files:
+        pdf_file = request.files['pdf']
+        message_text = extract_text_from_pdf(pdf_file)
+    else:
+        message_text = request.form.get("message_body", "")
+    
+    # Simple extraction from the text
+    transactions = []
+    for line in message_text.split('\n'):
+        match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s+([^\d$]+?)\s+([-$]?\d{1,3}(?:,\d{3})*\.\d{2})', line)
+        if match:
+            amount = float(re.sub(r'[^\d.-]', '', match.group(3)).replace(',', '.'))
+            transactions.append({
+                "date": match.group(1).replace('/', '-'),
+                "description": match.group(2).strip(),
+                "amount": amount
+            })
+    
+    if not transactions:
+        return jsonify({"status": "error", "message": "Could not read the PDF or text. Try a clearer bank statement."}), 400
     
     df = pd.DataFrame(transactions)
     df = SimpleCategorizer().auto_categorize(df)
@@ -85,7 +105,7 @@ def run_simple_agent():
         "client": client_name,
         "total_deductible": round(total_deductible, 2),
         "html_report": html_report,
-        "simple_summary": f"Tax savings: ${total_deductible:,.0f} | Top category: {df['category'].mode()[0] if not df.empty else 'none'}"
+        "simple_summary": f"Tax savings: ${total_deductible:,.0f}"
     })
 
 if __name__ == "__main__":
