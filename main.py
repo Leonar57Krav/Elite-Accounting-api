@@ -6,7 +6,7 @@ import pdfplumber
 
 app = Flask(__name__)
 
-# ====================== SIMPLE USA RULES ======================
+# Simple USA rules
 DEFAULT_RULES = {
     r"amazon|office depot|staples": "office_supplies",
     r"chatgpt|aws|zoom|adobe": "software",
@@ -17,16 +17,6 @@ DEFAULT_RULES = {
     r"gas|fuel|mileage": "vehicle",
 }
 
-class SimpleCategorizer:
-    def auto_categorize(self, df):
-        df = df.copy()
-        df['category'] = df['description'].str.lower().apply(self._match)
-        return df
-    def _match(self, desc):
-        for regex, cat in DEFAULT_RULES.items():
-            if re.search(regex, desc, re.IGNORECASE): return cat
-        return "other"
-
 def extract_text_from_pdf(pdf_file):
     text = ""
     with pdfplumber.open(pdf_file) as pdf:
@@ -36,7 +26,7 @@ def extract_text_from_pdf(pdf_file):
                 text += page_text + "\n"
     return text
 
-# ====================== SIMPLIFIED REPORT ======================
+# Clean simple report
 def create_simple_report(client_name, df, total_deductible):
     income = df[df['amount'] > 0]['amount'].sum()
     expenses = abs(df[df['amount'] < 0]['amount'].sum())
@@ -65,20 +55,17 @@ def create_simple_report(client_name, df, total_deductible):
     """
     return html
 
-# ====================== MAIN ENDPOINT (now accepts PDF files) ======================
 @app.route('/agent', methods=['POST'])
 def run_pdf_agent():
     client_name = request.form.get("client_name", "Valued Client")
-    source = request.form.get("source", "gmail")
     
-    # Support both text and PDF upload
     if 'pdf' in request.files:
         pdf_file = request.files['pdf']
         message_text = extract_text_from_pdf(pdf_file)
     else:
         message_text = request.form.get("message_body", "")
     
-    # Simple extraction from the text
+    # Extract transactions
     transactions = []
     for line in message_text.split('\n'):
         match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s+([^\d$]+?)\s+([-$]?\d{1,3}(?:,\d{3})*\.\d{2})', line)
@@ -91,10 +78,11 @@ def run_pdf_agent():
             })
     
     if not transactions:
-        return jsonify({"status": "error", "message": "Could not read the PDF or text. Try a clearer bank statement."}), 400
+        return jsonify({"status": "error", "message": "Could not read the PDF. Try a clearer bank statement."}), 400
     
     df = pd.DataFrame(transactions)
-    df = SimpleCategorizer().auto_categorize(df)
+    # Simple categorization
+    df['category'] = df['description'].str.lower().apply(lambda desc: next((cat for regex, cat in DEFAULT_RULES.items() if re.search(regex, desc, re.IGNORECASE)), "other"))
     
     total_deductible = abs(df[df['category'].isin(["office_supplies","software","travel","meals","marketing","home_office","vehicle"])]['amount'].sum())
     
@@ -104,8 +92,7 @@ def run_pdf_agent():
         "status": "success",
         "client": client_name,
         "total_deductible": round(total_deductible, 2),
-        "html_report": html_report,
-        "simple_summary": f"Tax savings: ${total_deductible:,.0f}"
+        "html_report": html_report
     })
 
 if __name__ == "__main__":
