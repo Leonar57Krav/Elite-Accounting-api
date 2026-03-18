@@ -3,10 +3,11 @@ import pandas as pd
 from datetime import datetime
 import re
 import pdfplumber
+from io import BytesIO
 
 app = Flask(__name__)
 
-# Simple USA rules
+# Your existing rules (unchanged)
 DEFAULT_RULES = {
     r"amazon|office depot|staples": "office_supplies",
     r"chatgpt|aws|zoom|adobe": "software",
@@ -17,58 +18,10 @@ DEFAULT_RULES = {
     r"gas|fuel|mileage": "vehicle",
 }
 
-def extract_text_from_pdf(pdf_file):
-    text = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
-
-# Clean simple report
-def create_simple_report(client_name, df, total_deductible):
-    income = df[df['amount'] > 0]['amount'].sum()
-    expenses = abs(df[df['amount'] < 0]['amount'].sum())
-    breakdown = df.groupby('category')['amount'].sum().abs().to_dict()
-    top_category = max(breakdown, key=breakdown.get) if breakdown else "none"
-    
-    html = f"""
-    <html><body style="font-family: Arial; line-height: 1.6; max-width: 600px;">
-        <h2>Elite Accounting USA — Simple Monthly Summary</h2>
-        <p>Hi {client_name},</p>
-        <p>Here's what we found in your bank statement:</p>
-        <h3>💰 Quick Numbers</h3>
-        <ul>
-            <li><strong>Income:</strong> ${income:,.0f}</li>
-            <li><strong>Expenses:</strong> ${expenses:,.0f}</li>
-            <li><strong>Tax Savings Found:</strong> <span style="color:green; font-size:18px;"><strong>${total_deductible:,.0f}</strong></span></li>
-        </ul>
-        <h3>📌 Top Deductible Items</h3>
-        <ul>
-            {"".join([f"<li>{cat.title()}: ${amount:,.0f}</li>" for cat, amount in list(breakdown.items())[:4]])}
-        </ul>
-        <p><strong>Quick Tip:</strong> Your biggest savings came from <strong>{top_category}</strong>.</p>
-        <p>Reply <strong>APPROVE</strong> to file with IRS or tell me changes.</p>
-        <p>— Elite Accounting USA</p>
-    </body></html>
-    """
-    return html
-
-@app.route('/agent', methods=['POST'])
-def run_pdf_agent():
-    client_name = request.form.get("client_name", "Valued Client")
-    
-    if 'pdf' in request.files:
-        pdf_file = request.files['pdf']
-        message_text = extract_text_from_pdf(pdf_file)
-    else:
-        message_text = request.form.get("message_body", "")
-    
-    # Extract transactions
+def extract_transactions_from_text(text: str) -> list:
     transactions = []
-    for line in message_text.split('\n'):
-        match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s+([^\d$]+?)\s+([-$]?\d{1,3}(?:,\d{3})*\.\d{2})', line)
+    for line in text.split('\n'):
+        match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s+([^\d$]+?)\s+([-$]?\d{1,3}(?:,\d{3})*\.\d{2})', line, re.IGNORECASE)
         if match:
             amount = float(re.sub(r'[^\d.-]', '', match.group(3)).replace(',', '.'))
             transactions.append({
@@ -76,18 +29,58 @@ def run_pdf_agent():
                 "description": match.group(2).strip(),
                 "amount": amount
             })
-    
+    return transactions
+
+@app.route('/agent', methods=['POST'])
+def process_pdf():
+    client_name = request.form.get("client_name", "Valued Client")
+
+    if 'pdf' in request.files:
+        file = request.files['pdf']
+        pdf_bytes = BytesIO(file.read())
+        text = ""
+        with pdfplumber.open(pdf_bytes) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+    else:
+        text = request.form.get("message_body", "")
+
+    if not text:
+        return jsonify({"status": "error", "message": "No text or PDF provided"}), 400
+
+    transactions = extract_transactions_from_text(text)
     if not transactions:
-        return jsonify({"status": "error", "message": "Could not read the PDF. Try a clearer bank statement."}), 400
-    
+        return jsonify({"status": "error", "message": "No transactions found in text/PDF"}), 400
+
     df = pd.DataFrame(transactions)
-    # Simple categorization
-    df['category'] = df['description'].str.lower().apply(lambda desc: next((cat for regex, cat in DEFAULT_RULES.items() if re.search(regex, desc, re.IGNORECASE)), "other"))
-    
-    total_deductible = abs(df[df['category'].isin(["office_supplies","software","travel","meals","marketing","home_office","vehicle"])]['amount'].sum())
-    
-    html_report = create_simple_report(client_name, df, total_deductible)
-    
+    df['category'] = df['description'].str.lower().apply(
+        lambda desc: next((cat for regex, cat in DEFAULT_RULES.items() if re.search(regex, desc, re.IGNORECASE)), "other")
+    )
+
+    deductible_categories = ["office_supplies", "software", "travel", "meals", "marketing", "home_office", "vehicle"]
+    total_deductible = abs(df[df['category'].isin(deductible_categories)]['amount'].sum())
+
+    html_report = f"""
+    <html>
+    <body style="font-family: Arial; line-height: 1.6; max-width: 600px;">
+        <h2>Elite Accounting USA — Simple Monthly Summary</h2>
+        <p>Hi {client_name},</p>
+        <p>Here's what we found in your bank statement:</p>
+        <h3>💰 Quick Numbers</h3>
+        <ul>
+            <li><strong>Income:</strong> ${df[df['amount'] > 0]['amount'].sum():,.0f}</li>
+            <li><strong>Expenses:</strong> ${abs(df[df['amount'] < 0]['amount'].sum()):,.0f}</li>
+            <li><strong>Tax Savings Found:</strong> <span style="color:green; font-size:18px;"><strong>${total_deductible:,.0f}</strong></span></li>
+        </ul>
+        <p><strong>Quick Tip:</strong> Your biggest savings came from the top category above.</p>
+        <p>Reply <strong>APPROVE</strong> to file with IRS or tell me changes.</p>
+        <p>— Elite Accounting USA</p>
+    </body>
+    </html>
+    """
+
     return jsonify({
         "status": "success",
         "client": client_name,
