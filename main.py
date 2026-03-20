@@ -6,7 +6,7 @@ import pdfplumber
 from io import BytesIO
 
 app = Flask(__name__)
-
+from flask_cors import CORS
 # Your existing rules (unchanged)
 DEFAULT_RULES = {
     r"amazon|office depot|staples": "office_supplies",
