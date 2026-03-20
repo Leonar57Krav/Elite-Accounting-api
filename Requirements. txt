@@ -2,4 +2,4 @@ flask
 pandas
 gunicorn
 pdfplumber
-flask-cors
+flask_cors
